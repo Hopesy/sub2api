@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Go](https://img.shields.io/badge/Go-1.25.7-00ADD8.svg)](https://golang.org/)
+[![Go](https://img.shields.io/badge/Go-1.26.2-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-336791.svg)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
@@ -376,13 +376,39 @@ rm -rf data/ postgres_data/ redis_data/
 
 ---
 
+### 构建并发布你自己的镜像（适用于 Fork 维护者）
+
+如果你维护的是自己的 fork，希望让 ClawCloud 或其他平台拉取**你自己的镜像**而不是上游官方镜像，仓库中已经提供了 `.github/workflows/publish-image.yml`。
+
+当前行为：
+
+- 推送符合 `v*` 规则的 tag 时，自动构建并发布 GHCR 镜像
+- 或者在 GitHub Actions 中手动触发 **Publish Image**
+- 镜像会发布到 `ghcr.io/<你的 GitHub owner>/<你的仓库名>`
+
+示例：
+
+```bash
+# 创建并推送发布标签
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流成功后，就可以在部署平台中使用你自己的镜像，例如：
+
+```text
+ghcr.io/<你的 GitHub owner>/<你的仓库名>:v0.1.0
+```
+
+生产环境建议优先使用明确版本 tag（或 workflow 生成的 SHA tag），不要长期直接依赖 `latest`。
+
 ### 方式三：源码编译
 
 从源码编译安装，适合开发或定制需求。
 
 #### 前置条件
 
-- Go 1.21+
+- Go 1.26.2+
 - Node.js 18+
 - PostgreSQL 15+
 - Redis 7+
