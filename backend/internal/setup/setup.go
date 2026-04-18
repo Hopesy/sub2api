@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -162,15 +164,19 @@ func NeedsSetup() bool {
 
 // TestDatabaseConnection tests the database connection and creates database if not exists
 func TestDatabaseConnection(cfg *DatabaseConfig) error {
-	// First, connect to the default 'postgres' database to check/create target database
-	defaultDSN := fmt.Sprintf(
+	maintenanceDB, err := chooseMaintenanceDatabase(cfg)
+	if err != nil {
+		return err
+	}
+
+	maintenanceDSN := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode,
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, maintenanceDB, cfg.SSLMode,
 	)
 
-	db, err := sql.Open("postgres", defaultDSN)
+	db, err := sql.Open("postgres", maintenanceDSN)
 	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+		return fmt.Errorf("failed to connect to PostgreSQL maintenance database: %w", err)
 	}
 
 	defer func() {
@@ -184,10 +190,6 @@ func TestDatabaseConnection(cfg *DatabaseConfig) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("ping failed: %w", err)
-	}
 
 	// Check if target database exists
 	var exists bool
@@ -240,10 +242,106 @@ func TestDatabaseConnection(cfg *DatabaseConfig) error {
 	return nil
 }
 
+func chooseMaintenanceDatabase(cfg *DatabaseConfig) (string, error) {
+	candidates := []string{"postgres", "template1"}
+	if dbName := strings.TrimSpace(cfg.DBName); dbName != "" {
+		candidates = append(candidates, dbName)
+	}
+
+	var lastErr error
+	for _, candidate := range candidates {
+		dsn := fmt.Sprintf(
+			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			cfg.Host, cfg.Port, cfg.User, cfg.Password, candidate, cfg.SSLMode,
+		)
+		db, err := sql.Open("postgres", dsn)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = db.PingContext(ctx)
+		cancel()
+		if closeErr := db.Close(); closeErr != nil {
+			logger.LegacyPrintf("setup", "failed to close postgres connection: %v", closeErr)
+		}
+		if err == nil {
+			if candidate != cfg.DBName {
+				logger.LegacyPrintf("setup", "Using maintenance database '%s' to bootstrap target database '%s'", candidate, cfg.DBName)
+			}
+			return candidate, nil
+		}
+		lastErr = err
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no available maintenance database candidates")
+	}
+	return "", fmt.Errorf("failed to connect to PostgreSQL maintenance database: %w", lastErr)
+}
+
+func normalizeRedisHost(raw string) (string, error) {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return "", nil
+	}
+
+	if strings.Contains(host, "://") {
+		parsed, err := url.Parse(host)
+		if err != nil {
+			return "", fmt.Errorf("parse redis host: %w", err)
+		}
+		if parsed.Host == "" {
+			return "", fmt.Errorf("parse redis host: missing host")
+		}
+		host = parsed.Host
+	}
+
+	if strings.Contains(host, "/") {
+		return "", fmt.Errorf("redis host %q should not contain path", raw)
+	}
+
+	if parsedHost, parsedPort, err := net.SplitHostPort(host); err == nil {
+		if parsedHost == "" {
+			return "", fmt.Errorf("redis host %q is missing host", raw)
+		}
+		if parsedPort == "" {
+			return "", fmt.Errorf("redis host %q is missing port value", raw)
+		}
+		return parsedHost, nil
+	}
+
+	trimmedIPv6 := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if strings.Count(trimmedIPv6, ":") >= 2 {
+		return trimmedIPv6, nil
+	}
+
+	if strings.Count(host, ":") > 1 {
+		return "", fmt.Errorf("redis host %q is invalid", raw)
+	}
+
+	return host, nil
+}
+
+func normalizeRedisConfig(cfg *RedisConfig) error {
+	host, err := normalizeRedisHost(cfg.Host)
+	if err != nil {
+		return err
+	}
+	cfg.Host = host
+	return nil
+}
+
+
 // TestRedisConnection tests the Redis connection
 func TestRedisConnection(cfg *RedisConfig) error {
+	if err := normalizeRedisConfig(cfg); err != nil {
+		return fmt.Errorf("normalize redis config: %w", err)
+	}
+
 	opts := &redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Addr:     net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
 		Password: cfg.Password,
 		DB:       cfg.DB,
 	}
@@ -287,6 +385,10 @@ func Install(cfg *SetupConfig) error {
 		}
 		cfg.JWT.Secret = secret
 		logger.LegacyPrintf("setup", "%s", "Warning: JWT secret auto-generated. Consider setting a fixed secret for production.")
+	}
+
+	if err := normalizeRedisConfig(&cfg.Redis); err != nil {
+		return fmt.Errorf("normalize redis config failed: %w", err)
 	}
 
 	// Test connections
@@ -574,6 +676,10 @@ func AutoSetupFromEnv() error {
 			ExpireHour: getEnvIntOrDefault("JWT_EXPIRE_HOUR", 24),
 		},
 		Timezone: tz,
+	}
+
+	if err := normalizeRedisConfig(&cfg.Redis); err != nil {
+		return fmt.Errorf("normalize redis config failed: %w", err)
 	}
 
 	// Generate JWT secret if not provided
