@@ -295,6 +295,9 @@ func normalizeRedisHost(raw string) (string, error) {
 		if parsed.Host == "" {
 			return "", fmt.Errorf("parse redis host: missing host")
 		}
+		if parsed.Path != "" && parsed.Path != "/" {
+			return "", fmt.Errorf("redis host %q should not contain path", raw)
+		}
 		host = parsed.Host
 	}
 
@@ -332,7 +335,6 @@ func normalizeRedisConfig(cfg *RedisConfig) error {
 	cfg.Host = host
 	return nil
 }
-
 
 // TestRedisConnection tests the Redis connection
 func TestRedisConnection(cfg *RedisConfig) error {
